@@ -732,14 +732,21 @@ async function renderExportUI() {
     const snap = await db.collection('members').orderBy('name').get();
     const allMembers = snap.docs;
 
-    // Build date range for selected month
-    const daysInMonth = new Date(selectedYear, selectedMonth+1, 0).getDate();
+    // Build date range for selected month (excluding Sundays)
+    const totalDays = new Date(selectedYear, selectedMonth+1, 0).getDate();
     const dates = [];
-    for (let d=1; d<=daysInMonth; d++) {
+    let workingDays = 0;
+    for (let d=1; d<=totalDays; d++) {
       const dd = String(d).padStart(2,'0');
       const mm = String(selectedMonth+1).padStart(2,'0');
-      dates.push(`${selectedYear}-${mm}-${dd}`);
+      const dateStr = `${selectedYear}-${mm}-${dd}`;
+      const dayOfWeek = new Date(dateStr).getDay(); // 0=Sunday
+      if (dayOfWeek !== 0) {
+        dates.push(dateStr);
+        workingDays++;
+      }
     }
+    const daysInMonth = workingDays; // use working days as denominator
 
     // Fetch all attendance records for this month
     const allRecs = [];
@@ -757,9 +764,10 @@ async function renderExportUI() {
       const L = recs.filter(r=>r.status==='L').length;
       const A = recs.filter(r=>r.status==='A').length;
       const H = recs.filter(r=>r.status==='H').length;
-      const total = P+L+A+H;
-      const pct = total ? Math.round((P+L*0.5+H*0.5)/total*100) : 0;
-      return { name:m.name, role:m.role, P, L, A, H, total, pct };
+      const marked = P+L+A+H;
+      // % based on total days in month, not just marked days
+      const pct = daysInMonth ? Math.round((P+L*0.5+H*0.5)/daysInMonth*100) : 0;
+      return { name:m.name, role:m.role, P, L, A, H, total:marked, daysInMonth, pct };
     });
 
     // Month selector buttons
@@ -802,7 +810,8 @@ async function renderExportUI() {
         <div class="export-preview">
           <b>Organisation:</b> ${config.orgName || 'Team'}<br>
           <b>Period:</b> ${MONTHS[selectedMonth]} ${selectedYear}<br>
-          <b>Working days recorded:</b> ${daysMarked}<br>
+          <b>Working days in month (excl. Sundays):</b> ${daysInMonth}<br>
+          <b>Days with attendance recorded:</b> ${daysMarked}<br>
           <b>Total members:</b> ${allMembers.length}<br>
           <b>Total present entries:</b> ${totalPresent}<br>
           <b>Total absent entries:</b> ${totalAbsent}
@@ -842,13 +851,14 @@ function exportCSV() {
   const r = window._exportRecs;
   if (!r.length) { toast('No data to export for this month.'); return; }
 
-  // Build day-wise CSV
-  const daysInMonth = new Date(selectedYear, selectedMonth+1, 0).getDate();
+  // Build day-wise CSV (excluding Sundays)
+  const totalDaysCSV = new Date(selectedYear, selectedMonth+1, 0).getDate();
   const dates = [];
-  for (let d=1; d<=daysInMonth; d++) {
+  for (let d=1; d<=totalDaysCSV; d++) {
     const dd = String(d).padStart(2,'0');
     const mm = String(selectedMonth+1).padStart(2,'0');
-    dates.push(`${selectedYear}-${mm}-${dd}`);
+    const dateStr = `${selectedYear}-${mm}-${dd}`;
+    if (new Date(dateStr).getDay() !== 0) dates.push(dateStr);
   }
 
   // Header row
@@ -895,14 +905,20 @@ function downloadCSV(rows, filename) {
     }).join(',')
   ).join('\n');
 
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const BOM = '\uFEFF'; // UTF-8 BOM for Excel compatibility
+  const blob = new Blob([BOM + csv], { type: 'text/csv;charset=utf-8;' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href     = url;
   a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
-  toast(`✓ ${filename} downloaded!`);
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 100);
+  toast('✓ ' + filename + ' downloaded!');
 }
 
 // ── BOOT ───────────────────────────────────────────────────
