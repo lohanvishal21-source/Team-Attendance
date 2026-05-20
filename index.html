@@ -718,7 +718,6 @@ const MONTHS = ['January','February','March','April','May','June',
                 'July','August','September','October','November','December'];
 
 function loadExport() {
-  const el = document.getElementById('exportContent');
   const now = new Date();
   selectedYear  = now.getFullYear();
   selectedMonth = now.getMonth();
@@ -769,7 +768,7 @@ async function renderExportUI() {
     ).join('');
 
     // Year selector
-    const years = [now.getFullYear()-1, now.getFullYear()];
+    const years = [new Date().getFullYear()-1, new Date().getFullYear()];
     const yearBtns = years.map(y =>
       `<button class="month-btn ${y===selectedYear?'selected':''}" onclick="changeYear(${y})" style="grid-column:span 1">${y}</button>`
     ).join('');
