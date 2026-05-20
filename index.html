@@ -813,10 +813,10 @@ async function renderExportUI() {
       <div class="export-card">
         <div class="export-card-title">Download Reports</div>
         <div class="export-card-sub">Export attendance data for ${MONTHS[selectedMonth]} ${selectedYear}</div>
-        <button class="btn btn-primary mb1" onclick="exportCSV(${JSON.stringify(allRecs).replace(/'/g,"&#39;")}, ${JSON.stringify(summary).replace(/'/g,"&#39;")})">
+           <button class="btn btn-primary mb1" onclick="exportCSV()">
           ↓ Download Full CSV (Day-wise)
         </button>
-        <button class="btn btn-secondary" onclick="exportSummaryCSV(${JSON.stringify(summary).replace(/'/g,"&#39;")})">
+        <button class="btn btn-secondary" onclick="exportSummaryCSV()">
           ↓ Download Summary CSV (Per Member)
         </button>
       </div>`;
@@ -838,8 +838,8 @@ function changeYear(y) {
   renderExportUI();
 }
 
-function exportCSV(recs, summary) {
-  const r = window._exportRecs || recs;
+function exportCSV() {
+  const r = window._exportRecs;
   if (!r.length) { toast('No data to export for this month.'); return; }
 
   // Build day-wise CSV
@@ -871,8 +871,8 @@ function exportCSV(recs, summary) {
 }
 
 function exportSummaryCSV(summary) {
-  const s = window._exportSummary || summary;
-  if (!s.length) { toast('No data to export.'); return; }
+  const s = window._exportSummary;
+  if (!s || !s.length) { toast('No data to export.'); return; }
   const headers = ['Member Name', 'Role', 'Present', 'Late', 'Absent', 'Half Day', 'Total Days', 'Attendance %'];
   const rows = [headers];
   s.forEach(m => rows.push([m.name, m.role||'', m.P, m.L, m.A, m.H, m.total, m.pct+'%']));
