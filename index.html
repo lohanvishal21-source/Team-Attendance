@@ -417,13 +417,18 @@ input:focus,select:focus,textarea:focus{border-color:var(--g)}
     <div class="divider"></div>
     <div class="field"><label>Marking Time Window <span style="color:var(--gray400);font-weight:400">(optional)</span></label>
       <div class="row2">
-        <div><label style="font-size:11px;color:var(--gray500)">From</label><input type="time" id="cfg-start" placeholder="09:00"></div>
-        <div><label style="font-size:11px;color:var(--gray500)">To</label><input type="time" id="cfg-end" placeholder="11:00"></div>
+        <div><label style="font-size:11px;color:var(--gray500)">Allow From</label><input type="time" id="cfg-start" placeholder="09:00"></div>
+        <div><label style="font-size:11px;color:var(--gray500)">Allow Until</label><input type="time" id="cfg-end" placeholder="11:00"></div>
       </div>
-      <div class="hint">Leave blank to allow marking any time.</div>
+      <div class="hint">The "Allow Until" time is also used as the <b>auto-absent cutoff</b> — anyone who hasn't marked by this time will be automatically marked Absent.</div>
     </div>
     <div class="err" id="cfgErr"></div>
     <button class="btn btn-primary mt1" onclick="saveSettings()">Save Settings</button>
+    <div class="divider"></div>
+    <div style="font-size:13px;font-weight:600;margin-bottom:6px">Database Maintenance</div>
+    <div class="hint" style="margin-bottom:10px">If attendance records appear duplicated in reports, click below to clean up. This keeps only the latest record per member per date.</div>
+    <button class="btn btn-danger" onclick="cleanDuplicates()" id="cleanBtn">🧹 Remove Duplicate Records</button>
+    <div id="cleanStatus" style="font-size:13px;margin-top:8px;display:none"></div>
   </div>
 </div>
 
@@ -760,12 +765,20 @@ async function renderExportUI() {
     // Build summary per member
     const summary = allMembers.map(m => {
       const recs = allRecs.filter(r => r.name === m.name);
-      const P = recs.filter(r=>r.status==='P').length;
-      const L = recs.filter(r=>r.status==='L').length;
-      const A = recs.filter(r=>r.status==='A').length;
-      const H = recs.filter(r=>r.status==='H').length;
+      // Deduplicate: only keep one record per date (latest by timestamp)
+      const byDate = {};
+      recs.forEach(r => {
+        if (!byDate[r.date] || r.timestamp > byDate[r.date].timestamp) {
+          byDate[r.date] = r;
+        }
+      });
+      const unique = Object.values(byDate);
+      const P = unique.filter(r=>r.status==='P').length;
+      const L = unique.filter(r=>r.status==='L').length;
+      const A = unique.filter(r=>r.status==='A').length;
+      const H = unique.filter(r=>r.status==='H').length;
       const marked = P+L+A+H;
-      // % based on total days in month, not just marked days
+      // % based on working days in month (excl. Sundays)
       const pct = daysInMonth ? Math.round((P+L*0.5+H*0.5)/daysInMonth*100) : 0;
       return { name:m.name, role:m.role, P, L, A, H, total:marked, daysInMonth, pct };
     });
@@ -870,7 +883,9 @@ function exportCSV() {
   s.forEach(mem => {
     const row = [mem.name, mem.role||''];
     dates.forEach(date => {
-      const rec = r.find(x => x.name===mem.name && x.date===date);
+      // Get all records for this member+date, pick latest
+      const dayRecs = r.filter(x => x.name===mem.name && x.date===date);
+      const rec = dayRecs.sort((a,b)=>(b.timestamp||'').localeCompare(a.timestamp||''))[0];
       row.push(rec ? rec.status : '');
     });
     row.push(mem.P, mem.L, mem.A, mem.H, mem.pct+'%');
@@ -919,6 +934,133 @@ function downloadCSV(rows, filename) {
     URL.revokeObjectURL(url);
   }, 100);
   toast('✓ ' + filename + ' downloaded!');
+}
+
+
+
+// ── CLEAN DUPLICATES ───────────────────────────────────────
+async function cleanDuplicates() {
+  const btn    = document.getElementById('cleanBtn');
+  const status = document.getElementById('cleanStatus');
+  if (!confirm('This will remove duplicate attendance records, keeping only the latest per member per date. Continue?')) return;
+
+  btn.disabled = true; btn.textContent = '🧹 Cleaning…';
+  status.style.display = 'block'; status.textContent = 'Fetching all records…';
+  status.style.color = 'var(--gray700)';
+
+  try {
+    // Fetch all attendance records
+    const snap = await db.collection('attendance').get();
+    const all  = snap.docs;
+    status.textContent = `Found ${all.length} total records. Analysing…`;
+
+    // Group by member+date
+    const groups = {};
+    all.forEach(r => {
+      const key = `${r.name}||${r.date}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(r);
+    });
+
+    // Find groups with duplicates
+    const toDelete = [];
+    Object.values(groups).forEach(group => {
+      if (group.length > 1) {
+        // Sort by timestamp descending - keep latest, delete rest
+        group.sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''));
+        for (let i=1; i<group.length; i++) {
+          toDelete.push(group[i].docId);
+        }
+      }
+    });
+
+    if (!toDelete.length) {
+      status.textContent = '✓ No duplicates found! Database is clean.';
+      status.style.color = 'var(--gd)';
+      btn.disabled = false; btn.textContent = '🧹 Remove Duplicate Records';
+      return;
+    }
+
+    status.textContent = `Found ${toDelete.length} duplicates. Deleting…`;
+
+    // Delete duplicates one by one
+    let deleted = 0;
+    for (const docId of toDelete) {
+      try {
+        await db.collection('attendance').doc(docId).delete();
+        deleted++;
+        status.textContent = `Deleting… ${deleted}/${toDelete.length}`;
+      } catch(e) { console.error('Could not delete', docId, e); }
+    }
+
+    status.textContent = `✓ Done! Removed ${deleted} duplicate records. Database is now clean.`;
+    status.style.color = 'var(--gd)';
+    btn.disabled = false; btn.textContent = '🧹 Remove Duplicate Records';
+
+    // Reload attendance view
+    await loadAttendance();
+
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--rd)';
+    btn.disabled = false; btn.textContent = '🧹 Remove Duplicate Records';
+  }
+}
+
+// ── AUTO ABSENT ────────────────────────────────────────────
+async function runAutoAbsent() {
+  try {
+    // Only run if cutoff time is set
+    if (!config.markEnd) return;
+
+    // Check if current IST time is past cutoff
+    const now = new Date(new Date().getTime() + 5.5*60*60*1000);
+    const [cutH, cutM] = config.markEnd.split(':').map(Number);
+    const cutoffMins = cutH*60 + cutM;
+    const nowMins = now.getUTCHours()*60 + now.getUTCMinutes();
+    if (nowMins < cutoffMins) return; // not yet past cutoff
+
+    // Only run for today
+    const date = todayIST();
+
+    // Skip Sundays
+    if (new Date(date).getDay() === 0) return;
+
+    // Get all members
+    const mSnap = await db.collection('members').orderBy('name').get();
+    const allMembers = mSnap.docs;
+
+    // Get today's attendance
+    const aSnap = await db.collection('attendance').where('date','==',date).get();
+    const marked = aSnap.docs.map(r => r.name);
+
+    // Mark absent for anyone not yet marked (only if no record exists at all)
+    let count = 0;
+    for (const m of allMembers) {
+      if (!marked.includes(m.name)) {
+        // Double-check no record exists for this member today
+        const check = await db.collection('attendance').where('date','==',date).get();
+        const alreadyExists = check.docs.some(r => r.name === m.name);
+        if (alreadyExists) continue;
+        await db.collection('attendance').add({
+          date,
+          name: m.name,
+          status: 'A',
+          markedBy: 'System (Auto)',
+          timestamp: nowIST(),
+          lat: null,
+          lng: null,
+          locked: true
+        });
+        count++;
+      }
+    }
+    if (count > 0) {
+      console.log(`Auto-absent: marked ${count} member(s) as absent for ${date}`);
+    }
+  } catch(e) {
+    console.log('Auto-absent skipped:', e.message);
+  }
 }
 
 // ── BOOT ───────────────────────────────────────────────────
@@ -972,6 +1114,8 @@ function doLogout() {
 // ── APP INIT ───────────────────────────────────────────────
 function initApp() {
   showScr('appScreen');
+  // Run auto-absent check silently on every login
+  runAutoAbsent();
   document.getElementById('hdrAv').textContent = ini(session.name);
   document.getElementById('hdrOrg').textContent = config.orgName || '';
   document.getElementById('hdrTitle').textContent = session.name;
@@ -1131,15 +1275,25 @@ async function saveAll() {
   let ok=0;
   for (const [name, status] of entries) {
     try {
-      const found = existing.find(r=>r.name===name);
-      const ts    = nowIST();
-      const data  = { date, name, status, markedBy: session.name, timestamp: ts,
-                      lat: geoCoords?.lat||null, lng: geoCoords?.lng||null,
-                      locked: !session.isAdmin }; // employees lock on save, admin doesn't
+      const ts = nowIST();
+      // Always re-check Firebase directly to avoid duplicates
+      const checkSnap = await db.collection('attendance').where('date','==',date).get();
+      const found = checkSnap.docs.find(r => r.name === name);
       if (found) {
-        await db.collection('attendance').doc(found.docId).update({status, markedBy:session.name, timestamp:ts, locked:!session.isAdmin});
+        // Update existing record
+        await db.collection('attendance').doc(found.docId).update({
+          status, markedBy: session.name, timestamp: ts,
+          locked: !session.isAdmin
+        });
       } else {
-        await db.collection('attendance').add(data);
+        // Only add if truly no record exists
+        await db.collection('attendance').add({
+          date, name, status,
+          markedBy: session.name, timestamp: ts,
+          lat: geoCoords ? String(geoCoords.lat) : '',
+          lng: geoCoords ? String(geoCoords.lng) : '',
+          locked: !session.isAdmin
+        });
       }
       ok++;
     } catch(e) { console.error(e); }
@@ -1294,6 +1448,133 @@ async function saveSettings() {
 // ── HISTORY date init ─────────────────────────────────────
 document.getElementById('histDate').value = todayIST();
 
+
+
+
+// ── CLEAN DUPLICATES ───────────────────────────────────────
+async function cleanDuplicates() {
+  const btn    = document.getElementById('cleanBtn');
+  const status = document.getElementById('cleanStatus');
+  if (!confirm('This will remove duplicate attendance records, keeping only the latest per member per date. Continue?')) return;
+
+  btn.disabled = true; btn.textContent = '🧹 Cleaning…';
+  status.style.display = 'block'; status.textContent = 'Fetching all records…';
+  status.style.color = 'var(--gray700)';
+
+  try {
+    // Fetch all attendance records
+    const snap = await db.collection('attendance').get();
+    const all  = snap.docs;
+    status.textContent = `Found ${all.length} total records. Analysing…`;
+
+    // Group by member+date
+    const groups = {};
+    all.forEach(r => {
+      const key = `${r.name}||${r.date}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(r);
+    });
+
+    // Find groups with duplicates
+    const toDelete = [];
+    Object.values(groups).forEach(group => {
+      if (group.length > 1) {
+        // Sort by timestamp descending - keep latest, delete rest
+        group.sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''));
+        for (let i=1; i<group.length; i++) {
+          toDelete.push(group[i].docId);
+        }
+      }
+    });
+
+    if (!toDelete.length) {
+      status.textContent = '✓ No duplicates found! Database is clean.';
+      status.style.color = 'var(--gd)';
+      btn.disabled = false; btn.textContent = '🧹 Remove Duplicate Records';
+      return;
+    }
+
+    status.textContent = `Found ${toDelete.length} duplicates. Deleting…`;
+
+    // Delete duplicates one by one
+    let deleted = 0;
+    for (const docId of toDelete) {
+      try {
+        await db.collection('attendance').doc(docId).delete();
+        deleted++;
+        status.textContent = `Deleting… ${deleted}/${toDelete.length}`;
+      } catch(e) { console.error('Could not delete', docId, e); }
+    }
+
+    status.textContent = `✓ Done! Removed ${deleted} duplicate records. Database is now clean.`;
+    status.style.color = 'var(--gd)';
+    btn.disabled = false; btn.textContent = '🧹 Remove Duplicate Records';
+
+    // Reload attendance view
+    await loadAttendance();
+
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--rd)';
+    btn.disabled = false; btn.textContent = '🧹 Remove Duplicate Records';
+  }
+}
+
+// ── AUTO ABSENT ────────────────────────────────────────────
+async function runAutoAbsent() {
+  try {
+    // Only run if cutoff time is set
+    if (!config.markEnd) return;
+
+    // Check if current IST time is past cutoff
+    const now = new Date(new Date().getTime() + 5.5*60*60*1000);
+    const [cutH, cutM] = config.markEnd.split(':').map(Number);
+    const cutoffMins = cutH*60 + cutM;
+    const nowMins = now.getUTCHours()*60 + now.getUTCMinutes();
+    if (nowMins < cutoffMins) return; // not yet past cutoff
+
+    // Only run for today
+    const date = todayIST();
+
+    // Skip Sundays
+    if (new Date(date).getDay() === 0) return;
+
+    // Get all members
+    const mSnap = await db.collection('members').orderBy('name').get();
+    const allMembers = mSnap.docs;
+
+    // Get today's attendance
+    const aSnap = await db.collection('attendance').where('date','==',date).get();
+    const marked = aSnap.docs.map(r => r.name);
+
+    // Mark absent for anyone not yet marked (only if no record exists at all)
+    let count = 0;
+    for (const m of allMembers) {
+      if (!marked.includes(m.name)) {
+        // Double-check no record exists for this member today
+        const check = await db.collection('attendance').where('date','==',date).get();
+        const alreadyExists = check.docs.some(r => r.name === m.name);
+        if (alreadyExists) continue;
+        await db.collection('attendance').add({
+          date,
+          name: m.name,
+          status: 'A',
+          markedBy: 'System (Auto)',
+          timestamp: nowIST(),
+          lat: null,
+          lng: null,
+          locked: true
+        });
+        count++;
+      }
+    }
+    if (count > 0) {
+      console.log(`Auto-absent: marked ${count} member(s) as absent for ${date}`);
+    }
+  } catch(e) {
+    console.log('Auto-absent skipped:', e.message);
+  }
+}
 
 // ── BOOT ──────────────────────────────────────────────────
 bootApp();
